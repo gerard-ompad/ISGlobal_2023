@@ -1,0 +1,403 @@
+---
+title: 'Spring school: Topic 1'
+author: "Dario Baretta & Guillaume Chevance"
+date: 'March 2023'
+params: 
+  answers: TRUE
+mainfont: Arial
+fontsize: 12pt
+urlcolor: blue
+output: 
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    df_print: paged
+    theme: paper
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    latex_engine: xelatex
+---
+
+# Preliminary steps
+
+### Load packages
+
+```{r setup, include=TRUE,warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# if the packages are not installed, first you need to install them using the install.packages() function
+library(tidyverse) # to do most of the data wrangling stuff
+library(gridExtra) # for better plot visualization
+library(imputeTS) # for NA imputation and visualization
+library(tseries) # for kpss and adf test
+library(zoo) # for rolling average
+
+```
+
+### Set working directory
+
+This line of code set the working directory where the R file saved
+
+```{r}
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+```
+
+### Data import
+
+As use case we start importing a step-count TS for participant P246
+
+```{r}
+ts <- read_csv('ts_steps_P246.csv') %>% 
+  mutate(id = 'P246') %>% 
+  select(id, date, steps)
+```
+
+### Basic syntax
+
+> **\$** is used to extarct a column from a data frame\
+> **[[ ]]** is used to extract an indexed element from a list\
+> **%\>%** is used to concatenate multiple actions
+
+# Time series exploration
+
+### Data format
+
+It is important to make sure that the date variable is in 'Date' format and not a character or an integer. All the operations you need to apply to date/time variables can be done via the lubridate package (<https://lubridate.tidyverse.org/>)
+
+```{r}
+
+list(ts$id, ts$date, ts$steps) %>%
+  map(class)
+
+```
+
+### Descriptive statistics
+
+```{r}
+# when the TS starts?
+ts.min <- min(ts$date)
+
+# when the TS ends?
+ts.max <- max(ts$date)
+
+# what is the length of the TS?
+ts.length <- max(ts$date) - min(ts$date) # it is possible to do mathematical operaitions if the variable date is in the right format
+
+print(ts.length)
+
+# we can do the same for the number of daily steps using the summary function, which is more convenient
+summary(ts$steps)
+
+```
+
+### Time series visualization
+
+A very important step when dealing with time series is to approach them in a visual way. In doing so, we recommend using the ggplot() function which is quite a flexible tool to create powerful charts (<https://ggplot2.tidyverse.org/index.html>)
+
+First we can check the distribution of steps, regardless of time
+
+```{r}
+ts %>% 
+  ggplot(aes(x = steps)) +
+  geom_histogram(color = 'black', fill = 'grey') + 
+  theme_bw()
+
+```
+
+Then we can see what is the tarjectory of steps over time
+
+```{r}
+ts %>%
+  ggplot(aes(x = date, y = steps)) +
+  geom_line() +
+  geom_point() + 
+  theme_bw()
+```
+
+# NAs in Time Series
+
+### Silent missings
+
+Most of the times, when dealing with TS the missing values are silent/hidden. In our example, if the number of steps for a given day is missing, the whole observation (row) is missing, and not only the value itself: we have a TS with daily step-count collected via a wearable device (e.g., FitBit). If on day x the device was switched off, we have a missing observation and the corresponding observation is not present in the TS. Therefore, before proceeding, we need to check if we have hidden missing observations.
+
+```{r}
+ts %>% 
+  mutate(lag_date = lag(date),
+         diff_date = date - lag_date) %>%
+  arrange(desc(diff_date))
+
+```
+
+In this case, we need to create missing observations - otherwise they would remain 'silent'. Practically speaking, we create a one column data frame that contain all the dates in between the minimum date and maximum date.
+
+```{r}
+start_date <- min(ts$date)
+end_date <- max(ts$date)
+
+df.date <- tibble(date = seq(start_date, end_date, by = 'days'), id = 'P246')
+```
+
+Then, we merge the time series with this newly created data frame.
+
+```{r}
+ts.2 <- df.date %>% 
+  left_join(ts, by = c('id', 'date')) %>% 
+  select(id, date, steps)
+```
+
+If we now run again the summary, we can see that now there are missing values
+
+```{r}
+summary(ts.2$steps)
+```
+
+enrich the TS with time-based variables - have a look at the lubridate package to see what are the time/date variables of your interest
+
+```{r}
+
+ts.3 <- ts.2 %>% 
+  mutate(day = day(date),
+         year = year(date),
+         month = month(date, label = T),
+         week = week(date),
+         wday = wday(date, label = T),
+         prog_day = seq_along(date))
+
+```
+
+Before moving to the next topics, we want to introduce the concept of rolling windows. For time series of continuous variables (e.g., steps) calculating the rolling average migth be useful to better visualize how the variable evolve over time.
+```{r}
+
+ts.3roll <- ts.3 %>% 
+  mutate(roll_steps = rollmean(steps, # the variable
+                               7, # the width of the rolling window
+                               fill = NA,
+                               align = 'right')) # if the result should be diplyed at the beginning, in the middle, or at the end of the window
+
+```
+Now we can visualize the rolling mean by adding a new layer to our previous ggplot
+```{r}
+ts.3roll %>%
+  ggplot(aes(x = date, y = steps)) +
+  geom_line(color = 'grey') +
+  geom_line(aes(y = roll_steps)) + 
+  theme_bw()
+
+```
+The interrupted rolling mean is because of the NAs that are part of our time series.
+
+### NAs descriptives and visualization
+
+In this step and the next one, we are going to use the imputeTS package (<https://journal.r-project.org/archive/2017/RJ-2017-009/index.html>)
+
+At first we can extract intersting statistics about the NAs
+
+```{r}
+statsNA(ts.3$steps)
+```
+
+Note, that if we pass the old time series (before adding the silent NAs) to the function, we would get different results.
+
+```{r}
+statsNA(ts$steps)
+```
+
+In combination with the NAs descriptive statistics, it is possible to produce a plot of their distribution. This plot allows to grasp the NAs distribution at one glance
+
+```{r}
+ggplot_na_distribution(ts.3$steps) 
+```
+
+### NAs imputation
+
+The imputeTS package provide various imputation methods that are described in details in the overmentioned link:\
+*'Looking at all available imputation methods, no single overall best method can be pointed out. Imputation performance is always very dependent on the characteristics of the input time series. Even imputation with mean values can sometimes be an appropriate method. For time series with a strong seasonality usually na.kalman and na.seadec / na.seasplit perform best. In general, for most time series one algorithm out of na.kalman, na.interpolation and na.seadec will yield the best results'*
+
+First, we replace the NAs using the Kalman filter
+
+```{r}
+ts.4 <- ts.3 %>% 
+  mutate(imptd_steps = as.integer(na_kalman(steps, model = "StructTS")))
+```
+
+Second, we visualize the imputed NAs
+
+```{r}
+ggplot_na_imputations(ts.4$steps, ts.4$imptd_steps) 
+
+
+```
+
+# Exercise #1
+
+### Now it is your turn:
+
+> 1.  Open the file 'Topic 1.rmd' and run the script to see how the TS look like for ids P819 ('ts_steps_P819.csv') and P515 ('ts_steps_P515.csv')\
+> 2.  For each of these participants, follow the steps we have seen so far\
+> 3.  Compare the two TS on the following parameters:\
+>     \> Descriptives (length, max, min, mean, distribution)\
+>     \> Presence of NAs and their distribution\
+>     \> Try out different imputation methods fromt the imputeTS package and visualize the plots: what are the differences between the various imputation methods? \> Based on visual inspection of the plots, what can you say in terms of fluctuations, linearity, and stationarity of the trajectory?
+
+# Autocorrelation
+
+As we said, the autocorrelation is the correlation between one variable and the delayed copy of itself.\
+We can manually calculate the autocorrelation between the variable 'steps' and it delayed copy at **lag 1**
+
+```{r}
+lag_1 <- cor.test(ts.4$imptd_steps, lag(ts.4$imptd_steps, 1)) 
+
+lag_1$estimate
+```
+
+We can do the same with the **lag 2**
+
+```{r}
+lag_2 <- cor.test(ts.4$imptd_steps, lag(ts.4$imptd_steps, 2)) 
+
+lag_2$estimate
+```
+
+and **lag 3**
+
+```{r}
+lag_3 <- cor.test(ts.4$imptd_steps, lag(ts.4$imptd_steps, 3)) 
+
+lag_3$estimate
+```
+
+and we can generate a comprehensive view of the autocorrelations
+
+```{r}
+broom::tidy(lag_1) %>% 
+  bind_rows(broom::tidy(lag_2)) %>% 
+  bind_rows(broom::tidy(lag_3))
+```
+
+Potentially, we can keep going till ***lag = K***, but fortunately there are functions that can help out with it
+
+What we have to do is to call the acf() function and specify the variable and the number of lags
+
+```{r}
+acf.lag1 <- acf(ts.4$imptd_steps, lag.max = 3)
+```
+
+The function by default return an autocorrelation plot, with the blue dashed lines, indicating the significance level for the estimates.
+
+However, if we print the object it returns a series of autocorrelations for the 3 different lags. As you can see, those are the same values that we have extracted before manually.
+
+```{r}
+print(acf.lag1)
+```
+
+By increasing the number of maximum lags, we can observe whether/how the autocorrelation unfolds
+
+```{r}
+acf(ts.4$imptd_steps, lag.max = 20)
+```
+
+```{r}
+acf(ts.4$imptd_steps, lag.max = 50)
+```
+
+```{r}
+acf(ts.4$imptd_steps, lag.max = 50)
+
+```
+
+# Partial autocorrelation
+
+At **lag 10**
+
+```{r}
+pacf(ts.4$imptd_steps, lag.max = 10)
+```
+
+At **lag 30**
+
+```{r}
+pacf(ts.4$imptd_steps, lag.max = 150)
+```
+
+At **lag 50**
+
+```{r}
+pacf(ts.4$imptd_steps, lag.max = 30)
+```
+
+# Exercise #2
+
+### Now it is your turn:
+
+> 1.  Keep considering ids P819 ('ts_steps_P819.csv') and P515 ('ts_steps_P515.csv')\
+> 2.  For each of these participants, run the acf() and pacf() functions at the following max.lags: 50, 100, 150, 200\
+> 3.  What happens when we increase the max.lag? do you see different autocorrelation patterns? can we say something more about the time series?
+> 4.  What about the partial autocorrelation?
+
+# Stationarity
+
+**Stationarity** implies that **all moments** (i.e., means, variances, covariances, lagged covariances, etc.) are **invariant over time**.
+
+A time series is stationary when:
+
+-   the mean is stable over time (i.e, no trend or cycle): **mean-stationary**
+
+-   the variances and autocovariances are stable over time: **covariance-stationary**
+
+Reasons for **non-stationarity**:
+
+-   the process has a unit root (e.g., a random walk)
+
+-   the process is characterized by a trend over time
+
+-   the parameters (e.g., autoregressive parameter, intercept) change over time
+
+Stationarity can be checked in R by performing an Augmented Dickey-Fuller (**ADF**) and the Kwiatkowski--Phillips--Schmidt--Shin (**KPSS**) tests.
+
+Before running the tests, let's insepct the time series another time
+
+```{r}
+ts.4 %>% 
+  ggplot(aes(y = imptd_steps, x = date)) +
+  geom_line() +
+  theme_bw()
+  
+```
+
+Test for unit root (e.g., random walk):\
+- The alternative hypothesis (H1) is: **stationarity**
+
+```{r}
+adf.test(ts.4$imptd_steps) 
+```
+
+Test for unit mean:\
+- The alternative hypothesis (H1) is: **not mean-stationarity**
+
+```{r}
+kpss.test(ts.4$imptd_steps)
+
+```
+
+Test for trend: - The alternative hypothesis (H1) is: **not trend-stationarity**
+
+```{r}
+kpss.test(ts.4$imptd_steps, null = "Trend")
+
+```
+
+Apparently, it looks like the time series is not mean-stationary. Could you guess when this happens in the time series?
+
+# Exercise #3
+
+### Now it is your turn:
+
+> 1.  Consider all the participants you have in the folder
+> 2.  For each of these participants:  
+> -  Generate a plot and visually inspect the time series to see if there might be non-stationary processes  
+> -  Run the three tests for each time series and comment the results in light of the visual inspection of the plot.
+
+
+
+
